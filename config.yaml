@@ -1,0 +1,42 @@
+stock:
+  ticker: "RELIANCE.NS"
+  start_date: "2020-01-01"
+  end_date: "2024-12-31"
+  benchmark: "^NSEI"
+
+ralph:
+  max_iterations: 100
+  cost_budget_usd: 5.0
+  dsr_plateau_window: 10
+  dsr_plateau_threshold: 0.01
+  halt_pbo_threshold: 0.20
+
+hyperparameter_space:
+  stop_loss_pct:   [0.005, 0.10]
+  take_profit_pct: [0.01,  0.30]
+  holding_days:    [1, 60]
+  sma_fast:        [5, 50]
+  sma_slow:        [20, 200]
+  rsi_period:      [7, 21]
+  vol_target_pct:  [0.10, 0.25]
+  kelly_fraction:  [0.10, 0.50]
+
+risk:
+  alpha_level: 0.05
+  cvar_confidence: 0.95
+  dynamic_stop_multiplier: 2.0
+  min_capacity_usd: 10000
+
+transaction_costs:
+  commission_pct: 0.001
+  slippage_lambda: 0.1
+  adv_fraction: 0.01
+
+factors:
+  use_fama_french: true
+  ff_factors: ["Mkt-RF", "SMB", "HML"]
+
+output:
+  csv_path: "results.csv"
+  memory_dir: "memory/"
+  report_path: "final_report.txt"

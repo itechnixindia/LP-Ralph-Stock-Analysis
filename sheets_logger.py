@@ -74,33 +74,40 @@ def get_column_order() -> List[str]:
         # Group B — Parameters
         "stop_loss_pct", "take_profit_pct", "holding_days", "sma_fast",
         "sma_slow", "rsi_period", "vol_target_pct", "kelly_fraction",
-        # Group C — Sentiment (NEW)
+        # Group B2 — Sentiment
         "sentiment_score", "sentiment_label", "n_headlines",
-        # Group D — Signal
+        # Group C — Signal
         "ic_mean", "ic_std", "ic_ir", "factor_alpha", "factor_beta_mkt",
         "factor_beta_smb", "factor_beta_hml", "factor_r2", "half_life_days",
-        # Group E — Sizing
+        # Group D — Sizing
         "kelly_full", "kelly_applied", "vol_target_weight", "final_weight",
         "stop_loss_dynamic", "stop_loss_used", "garch_sigma",
-        # Group F — Backtest
+        # Group E — Backtest
         "gross_sharpe", "net_sharpe_tc", "total_return", "max_drawdown",
         "win_rate", "num_trades", "avg_holding_days", "turnover_annual",
         "total_tc_paid", "capacity_usd", "regime",
-        # Group G — Stats
+        # Group F — Stats
         "jarque_bera_pval", "is_normal", "ttest_stat", "ttest_pval",
-        "ttest_reject_null", "sharpe_ci_low", "sharpe_ci_high", "sharpe_ci_width",
-        "cvar_95", "var_95", "skewness", "kurtosis", "sortino", "calmar", "omega",
-        # Group H — DSR
+        "ttest_reject_null", "sharpe_ci_low", "sharpe_ci_high",
+        "sharpe_ci_width", "cvar_95", "var_95", "skewness", "kurtosis",
+        "sortino", "calmar", "omega", "regime_sharpe", "regime_win_rate",
+        # Group G — DSR
         "dsr", "dsr_verdict", "min_trl_days", "min_trl_satisfied",
-        "pbo", "is_new_leader", "leader_dsr",
-        # Group I — RALPH metadata
+        "pbo", "is_new_leader", "leader_dsr", "trials_penalty",
+        "expected_max_sr",
+        # Group H — RALPH metadata
         "pruned", "prune_reasons", "cumul_best_dsr", "dsr_delta",
         "halt_triggered", "halt_reason",
-        # Group J — LLM verdicts
-        "agent0_sentiment_label", "agent1_signal_quality",
-        "agent2_sizing_verdict", "agent3_backtest_quality",
-        "agent4_stats_quality", "agent5_final_verdict",
-        "agent5_mutator_instruction",
+        # Group I — LLM narratives
+        "agent0_sentiment_label",
+        "agent1_signal_quality", "agent1_narrative",
+        "agent2_sizing_verdict",
+        "agent3_backtest_quality", "agent3_anomalies",
+        "agent4_stats_quality",
+        "agent5_final_verdict", "agent5_verdict_narrative",
+        "agent5_mutator_instruction", "agent6_selection_rationale",
+        # Group J — LLM cost tracking
+        "llm_input_tokens", "llm_output_tokens", "llm_calls", "llm_cost_usd",
     ]
 
 

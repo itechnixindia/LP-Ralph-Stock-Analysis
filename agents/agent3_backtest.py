@@ -58,6 +58,7 @@ def run_backtest(
     final_weight: float,
     signal_series: list,
     regime: str = "unknown",
+    sentiment_score: float = 0.0,
     transaction_costs: dict = None,
     accumulated_context: dict = None,
     prior_iterations_summary: str = "",
@@ -114,11 +115,26 @@ def run_backtest(
     adv_21 = volume.rolling(21).mean() * close  # dollar ADV
 
     # ── Entry condition ───────────────────────────────────────────────────────
-    entry_signal = (
+    # Base technical signal
+    tech_signal = (
         (sma_f > sma_s)
         & (rsi < RSI_ENTRY_THRESHOLD)
         & (sig > 0)
     )
+
+    # Blend sentiment: if bullish (>0.1), relax RSI; if bearish (<-0.1), tighten
+    from constants import SENTIMENT_ENTRY_WEIGHT
+    if abs(sentiment_score) > 0.1:
+        sentiment_boost = sentiment_score * SENTIMENT_ENTRY_WEIGHT
+        adjusted_rsi_threshold = RSI_ENTRY_THRESHOLD + (sentiment_boost * 10)
+        adjusted_rsi_threshold = max(30, min(80, adjusted_rsi_threshold))
+        entry_signal = (
+            (sma_f > sma_s)
+            & (rsi < adjusted_rsi_threshold)
+            & (sig > 0)
+        )
+    else:
+        entry_signal = tech_signal
 
     # ── Event-driven backtest ─────────────────────────────────────────────────
     dates = close.index

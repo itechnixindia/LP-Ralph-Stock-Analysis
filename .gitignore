@@ -1,6 +1,7 @@
 # Credentials — NEVER commit these
 credentials/
 *.json
+.env
 !config.yaml
 
 # Allow specific JSON files in memory/

@@ -277,6 +277,17 @@ def propose_params(
                     "selection_rationale": insight.get("override_reason", "LLM override."),
                     "insight": insight,
                 }
+            else:
+                missing = [k for k in PARAM_KEYS if k not in override]
+                logger.warning(
+                    f"Agent6: LLM requested GP override but params incomplete. "
+                    f"Missing keys: {missing}. Falling through to GP candidate."
+                )
+        else:
+            logger.warning(
+                f"Agent6: LLM override_params is not a dict: {type(override)}. "
+                f"Falling through to GP candidate."
+            )
 
     selected_params = candidates[selected_idx]
     selected_ei = ei_scores[selected_idx] if ei_scores else 0.0

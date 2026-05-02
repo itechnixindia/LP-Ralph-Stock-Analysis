@@ -121,7 +121,12 @@ def _fit_garch(returns: np.ndarray, fallback_sigma: float = 0.02) -> float:
             pct_returns = returns * 100
             model = arch_model(pct_returns, vol="Garch", p=1, q=1, dist="normal")
             res = model.fit(disp="off", show_warning=False)
-            sigma_pct = float(res.conditional_volatility.iloc[-1])
+            cond_vol = res.conditional_volatility
+            # Handle both pandas Series and numpy array
+            if hasattr(cond_vol, 'iloc'):
+                sigma_pct = float(cond_vol.iloc[-1])
+            else:
+                sigma_pct = float(cond_vol[-1])
             return sigma_pct / 100.0
     except Exception as e:
         logger.warning(f"GARCH fit failed: {e}. Using rolling std fallback.")

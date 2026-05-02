@@ -43,6 +43,8 @@ CSV_COLUMNS = [
     # Group B — params
     "stop_loss_pct", "take_profit_pct", "holding_days", "sma_fast", "sma_slow",
     "rsi_period", "vol_target_pct", "kelly_fraction",
+    # Group B2 — sentiment
+    "sentiment_score", "sentiment_label", "n_headlines",
     # Group C — signal
     "ic_mean", "ic_std", "ic_ir", "factor_alpha", "factor_beta_mkt",
     "factor_beta_smb", "factor_beta_hml", "factor_r2", "half_life_days",
@@ -65,12 +67,15 @@ CSV_COLUMNS = [
     "pruned", "prune_reasons", "cumul_best_dsr", "dsr_delta",
     "halt_triggered", "halt_reason",
     # Group I — LLM narratives
+    "agent0_sentiment_label",
     "agent1_signal_quality", "agent1_narrative",
     "agent2_sizing_verdict",
     "agent3_backtest_quality", "agent3_anomalies",
     "agent4_stats_quality",
     "agent5_final_verdict", "agent5_verdict_narrative", "agent5_mutator_instruction",
     "agent6_selection_rationale",
+    # Group J — LLM cost tracking
+    "llm_input_tokens", "llm_output_tokens", "llm_calls", "llm_cost_usd",
 ]
 
 
@@ -367,6 +372,10 @@ def run_ralph_loop(config_path: str = "config.yaml"):
             }
             prior_summary = memory.get_prior_iterations_summary(last_n=5)
 
+            # Reset LLM cost tracker for this iteration
+            from llm_client import reset_iteration_cost, get_iteration_cost
+            reset_iteration_cost()
+
             # ── A: ASSESS — pipeline stages 0→1→2→3→4→5 ─────────────────────
 
             # Stage 0: Sentiment (optional)
@@ -437,6 +446,10 @@ def run_ralph_loop(config_path: str = "config.yaml"):
                 final_weight=siz_out["final_weight"],
                 signal_series=sig_out["signal_series"],
                 regime=regime,
+                sentiment_score=(
+                    sentiment_out.get("sentiment_score", 0.0)
+                    if sentiment_out else 0.0
+                ),
                 transaction_costs=config["transaction_costs"],
                 accumulated_context=accumulated_context,
                 prior_iterations_summary=prior_summary,
@@ -631,8 +644,20 @@ def run_ralph_loop(config_path: str = "config.yaml"):
                 row["n_headlines"] = sentiment_out.get("n_headlines", "")
                 row["agent0_sentiment_label"] = sentiment_out.get("sentiment_label", "")
 
+            # Inject LLM cost tracking
+            cost_data = get_iteration_cost()
+            row["llm_input_tokens"] = cost_data["input_tokens"]
+            row["llm_output_tokens"] = cost_data["output_tokens"]
+            row["llm_calls"] = cost_data["llm_calls"]
+            row["llm_cost_usd"] = round(cost_data["total_cost_usd"], 6)
+
             append_csv_row(csv_path, row)
-            logger.info(f"  CSV row written (iter {iteration})")
+            logger.info(
+                f"  CSV row written (iter {iteration}) | "
+                f"LLM cost: ${cost_data['total_cost_usd']:.4f} "
+                f"({cost_data['llm_calls']} calls, "
+                f"{cost_data['input_tokens']}+{cost_data['output_tokens']} tokens)"
+            )
 
             # Log to Google Sheets
             if sheets_logger:

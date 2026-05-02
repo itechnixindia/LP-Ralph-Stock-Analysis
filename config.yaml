@@ -1,0 +1,65 @@
+stock:
+  ticker: "RELIANCE.NS"
+  start_date: "2020-01-01"
+  end_date: "2024-12-31"
+  benchmark: "^NSEI"
+
+ralph:
+  max_iterations: 100
+  cost_budget_usd: 5.0
+  dsr_plateau_window: 10
+  dsr_plateau_threshold: 0.01
+  halt_pbo_threshold: 0.20
+
+hyperparameter_space:
+  stop_loss_pct:   [0.005, 0.10]
+  take_profit_pct: [0.01,  0.30]
+  holding_days:    [1, 60]
+  sma_fast:        [5, 50]
+  sma_slow:        [20, 200]
+  rsi_period:      [7, 21]
+  vol_target_pct:  [0.10, 0.25]
+  kelly_fraction:  [0.10, 0.50]
+
+risk:
+  alpha_level: 0.05
+  cvar_confidence: 0.95
+  dynamic_stop_multiplier: 2.0
+  min_capacity_usd: 10000
+
+transaction_costs:
+  commission_pct: 0.001
+  slippage_lambda: 0.1
+  adv_fraction: 0.01
+
+factors:
+  use_fama_french: true
+  ff_factors: ["Mkt-RF", "SMB", "HML"]
+
+walk_forward:
+  enabled: true
+  mode: "single"              # "single", "expanding", "rolling"
+  test_ratio: 0.20            # 20% of data reserved for OOS testing
+  n_folds: 3                  # folds for expanding/rolling mode
+  top_n_validate: 5           # validate top-N leaderboard strategies OOS
+
+sentiment:
+  enabled: true
+  entry_weight: 0.15          # how much sentiment affects entry condition
+  min_headlines: 3            # minimum headlines for a valid signal
+
+sheets_logger:
+  enabled: true
+  spreadsheet_id: "1FWh1kH3UaspfXH4qiCd8AOZ9XrF1X2011R4zIlkA3_s"
+  sheet_name: "RALPH Results"
+  # Setup steps:
+  #   1. Enable Google Sheets API in your GCP project
+  #   2. Create service account → download JSON key
+  #   3. Save key to: credentials/service_account.json
+  #   4. Create a Google Sheet and share (Editor) with service account email
+  #   5. Paste the spreadsheet ID here and set enabled: true
+
+output:
+  csv_path: "results.csv"
+  memory_dir: "memory/"
+  report_path: "final_report.txt"

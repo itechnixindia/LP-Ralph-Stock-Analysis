@@ -6,54 +6,28 @@ Intelligence layer: LLM interprets signal quality and advises agent2.
 """
 
 import logging
-import os
 import warnings
 
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
+from constants import (
+    ANNUALIZATION_FACTOR,
+    EPSILON,
+    IC_EXCELLENT_THRESHOLD,
+    IC_GOOD_THRESHOLD,
+    IC_MIN_WINDOW_SIZE,
+    IC_ROLLING_WINDOW,
+    IC_TREND_DELTA,
+    IC_TREND_LOOKBACK,
+    OU_DEFAULT_HALF_LIFE,
+    OU_MIN_OBSERVATIONS,
+    OU_NON_MEAN_REVERTING_FALLBACK,
+)
+from data_loader import load_ff_factors, load_prices
+
 logger = logging.getLogger(__name__)
-
-CACHE_DIR = "cache/"
-
-
-# ── Data helpers ──────────────────────────────────────────────────────────────
-
-def _load_prices(ticker: str, start: str, end: str) -> pd.DataFrame:
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    safe_ticker = ticker.replace("^", "IDX_")
-    cache_file = os.path.join(CACHE_DIR, f"prices_{safe_ticker}_{start}_{end}.csv")
-    if os.path.exists(cache_file):
-        df = pd.read_csv(cache_file, index_col=0, parse_dates=True)
-        return df
-
-    import yfinance as yf
-    df = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
-    # Flatten MultiIndex columns (yfinance >= 0.2.x may return MultiIndex)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.droplevel(1)
-    df.to_csv(cache_file)
-    return df
-
-
-def _load_ff_factors(start: str, end: str) -> pd.DataFrame:
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    cache_file = os.path.join(CACHE_DIR, f"ff_factors_{start}_{end}.csv")
-    if os.path.exists(cache_file):
-        return pd.read_csv(cache_file, index_col=0, parse_dates=True)
-
-    try:
-        import pandas_datareader.data as web
-        ff = web.DataReader("F-F_Research_Data_Factors_daily", "famafrench",
-                            start=start, end=end)[0]
-        ff = ff / 100.0
-        ff.index = pd.to_datetime(ff.index)
-        ff.to_csv(cache_file)
-        return ff
-    except Exception as e:
-        logger.warning(f"Could not download Fama-French factors: {e}. Falling back.")
-        return pd.DataFrame()
 
 
 # ── Computation layer ─────────────────────────────────────────────────────────
@@ -78,7 +52,7 @@ def compute_signal(
     rsi_period = int(params["rsi_period"])
     holding_days = int(params["holding_days"])
 
-    df = _load_prices(ticker, start_date, end_date)
+    df = load_prices(ticker, start_date, end_date)
     if df is None or len(df) < max(sma_slow, 100):
         raise ValueError(
             f"Insufficient data for {ticker}. Need at least {max(sma_slow, 100)} rows."
@@ -91,8 +65,8 @@ def compute_signal(
     sma_f = close.rolling(sma_fast).mean()
     sma_s = close.rolling(sma_slow).mean()
     raw_signal = (sma_f - sma_s) / close
-    signal_zscore = (raw_signal - raw_signal.rolling(60).mean()) / (
-        raw_signal.rolling(60).std() + 1e-9
+    signal_zscore = (raw_signal - raw_signal.rolling(IC_ROLLING_WINDOW).mean()) / (
+        raw_signal.rolling(IC_ROLLING_WINDOW).std() + EPSILON
     )
 
     # ── RSI ───────────────────────────────────────────────────────────────────
@@ -103,7 +77,7 @@ def compute_signal(
         delta = close.diff()
         gain = delta.clip(lower=0).rolling(rsi_period).mean()
         loss = (-delta.clip(upper=0)).rolling(rsi_period).mean()
-        rs = gain / (loss + 1e-9)
+        rs = gain / (loss + EPSILON)
         rsi = 100 - (100 / (1 + rs))
 
     # ── Daily returns ─────────────────────────────────────────────────────────
@@ -115,11 +89,10 @@ def compute_signal(
         {"signal": signal_zscore, "fwd": forward_returns}
     ).dropna()
 
-    window_size = 60
     ic_values = []
-    for i in range(window_size, len(aligned)):
-        window = aligned.iloc[i - window_size: i]
-        if len(window) < 20:
+    for i in range(IC_ROLLING_WINDOW, len(aligned)):
+        window = aligned.iloc[i - IC_ROLLING_WINDOW: i]
+        if len(window) < IC_MIN_WINDOW_SIZE:
             continue
         corr, _ = spearmanr(window["signal"], window["fwd"])
         if not np.isnan(corr):
@@ -127,10 +100,10 @@ def compute_signal(
 
     ic_mean = float(np.mean(ic_values)) if ic_values else 0.0
     ic_std = float(np.std(ic_values)) if ic_values else 0.01
-    ic_ir = ic_mean / (ic_std + 1e-9)
+    ic_ir = ic_mean / (ic_std + EPSILON)
 
     # ── Fama-French factor regression ─────────────────────────────────────────
-    ff = _load_ff_factors(start_date, end_date)
+    ff = load_ff_factors(start_date, end_date)
     factor_alpha = 0.0
     factor_beta_mkt = 1.0
     factor_beta_smb = 0.0
@@ -171,11 +144,11 @@ def compute_signal(
 
     # ── IC trend ─────────────────────────────────────────────────────────────
     ic_trend = "stable"
-    if len(ic_history) >= 5:
-        recent = ic_history[-5:]
-        if recent[-1] > recent[0] + 0.01:
+    if len(ic_history) >= IC_TREND_LOOKBACK:
+        recent = ic_history[-IC_TREND_LOOKBACK:]
+        if recent[-1] > recent[0] + IC_TREND_DELTA:
             ic_trend = "improving"
-        elif recent[-1] < recent[0] - 0.01:
+        elif recent[-1] < recent[0] - IC_TREND_DELTA:
             ic_trend = "declining"
 
     # ── Assemble raw output ───────────────────────────────────────────────────
@@ -215,8 +188,8 @@ def _compute_ou_half_life(series: pd.Series) -> float:
     try:
         import statsmodels.api as sm
         s = series.dropna()
-        if len(s) < 30:
-            return 10.0
+        if len(s) < OU_MIN_OBSERVATIONS:
+            return OU_DEFAULT_HALF_LIFE
         delta = s.diff().dropna()
         lagged = s.shift(1).dropna()
         aligned = pd.DataFrame({"delta": delta, "lag": lagged}).dropna()
@@ -224,10 +197,10 @@ def _compute_ou_half_life(series: pd.Series) -> float:
         result = sm.OLS(aligned["delta"], X).fit()
         theta = result.params.get("lag", 0.0)
         if theta >= 0:
-            return 30.0
+            return OU_NON_MEAN_REVERTING_FALLBACK
         return float(-np.log(2) / theta)
     except Exception:
-        return 10.0
+        return OU_DEFAULT_HALF_LIFE
 
 
 def _run_intelligence_layer(
@@ -249,10 +222,12 @@ def _run_intelligence_layer(
         prior_iterations_summary=prior_iterations_summary,
     )
 
-    # Defaults if LLM unavailable
+    ic = raw_numbers.get("ic_mean", 0)
     defaults = {
-        "signal_quality": "moderate" if raw_numbers.get("ic_mean", 0) >= 0.05 else "weak",
-        "ic_interpretation": f"IC of {raw_numbers.get('ic_mean', 0):.3f} computed.",
+        "signal_quality": "strong" if ic >= IC_EXCELLENT_THRESHOLD else (
+            "moderate" if ic >= IC_GOOD_THRESHOLD else "weak"
+        ),
+        "ic_interpretation": f"IC of {ic:.3f} computed.",
         "alpha_interpretation": "Factor alpha computed.",
         "half_life_verdict": "matched",
         "half_life_explanation": "Holding period alignment assessed.",

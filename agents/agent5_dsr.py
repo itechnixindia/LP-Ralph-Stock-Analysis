@@ -10,9 +10,15 @@ import logging
 import numpy as np
 from scipy.stats import norm
 
-logger = logging.getLogger(__name__)
+from constants import (
+    ANNUALIZATION_FACTOR,
+    DSR_ACCEPT_THRESHOLD,
+    DSR_MARGINAL_THRESHOLD,
+    EULER_MASCHERONI,
+    MIN_TRL_MAX,
+)
 
-EMC = 0.5772156649  # Euler-Mascheroni constant
+logger = logging.getLogger(__name__)
 
 
 # ── DSR formula ───────────────────────────────────────────────────────────────
@@ -38,15 +44,15 @@ def compute_dsr(
         expected_max_sr = sr_benchmark
     else:
         try:
-            term1 = (1 - EMC) * norm.ppf(1 - 1.0 / n_trials)
-            term2 = EMC * norm.ppf(1 - 1.0 / (n_trials * np.e))
+            term1 = (1 - EULER_MASCHERONI) * norm.ppf(1 - 1.0 / n_trials)
+            term2 = EULER_MASCHERONI * norm.ppf(1 - 1.0 / (n_trials * np.e))
             expected_max_sr = term1 + term2
         except Exception:
             expected_max_sr = sr_benchmark
 
     # Convert annualized SR to per-period SR
-    sr_period = sr_hat / np.sqrt(252)
-    expected_period = expected_max_sr / np.sqrt(252)
+    sr_period = sr_hat / np.sqrt(ANNUALIZATION_FACTOR)
+    expected_period = expected_max_sr / np.sqrt(ANNUALIZATION_FACTOR)
 
     # Variance adjustment for non-normality
     variance_adj = 1.0 - skew * sr_period + ((kurt - 1.0) / 4.0) * sr_period ** 2
@@ -72,13 +78,13 @@ def compute_min_trl(
 ) -> int:
     """Minimum track record length to confirm SR is real (in daily obs)."""
     if sr_target <= sr_benchmark:
-        return 999999
+        return MIN_TRL_MAX
     z = norm.ppf(1 - alpha)
     variance_adj = 1.0 - skew * sr_target + ((kurt - 1.0) / 4.0) * sr_target ** 2
     variance_adj = max(variance_adj, 1e-6)
-    sr_period = (sr_target - sr_benchmark) / np.sqrt(252)
+    sr_period = (sr_target - sr_benchmark) / np.sqrt(ANNUALIZATION_FACTOR)
     if sr_period <= 0:
-        return 999999
+        return MIN_TRL_MAX
     min_trl = (1.0 + variance_adj) * (z / sr_period) ** 2
     return int(np.ceil(min_trl))
 
@@ -91,9 +97,9 @@ def compute_pbo(sr_hat: float, n_trials: int) -> float:
     if n_trials <= 1:
         return 0.5
     n_trials = max(n_trials, 1)
-    # P(max of N i.i.d. N(0,1) > observed_z) approximation
-    # PBO = 1 - DSR where DSR is relative to 0 benchmark with n_trials
-    _, expected_max, _ = compute_dsr(sr_hat, 252, 0.0, 3.0, n_trials, sr_benchmark=0.0)
+    _, expected_max, _ = compute_dsr(
+        sr_hat, ANNUALIZATION_FACTOR, 0.0, 3.0, n_trials, sr_benchmark=0.0
+    )
     if expected_max <= 0:
         return 0.1
     pbo = float(np.clip(expected_max / max(sr_hat, 0.01), 0.0, 1.0))
@@ -133,7 +139,7 @@ def compute_dsr_verdict(
     )
 
     min_trl = compute_min_trl(
-        sr_target=net_sharpe_tc / np.sqrt(252),
+        sr_target=net_sharpe_tc / np.sqrt(ANNUALIZATION_FACTOR),
         sr_benchmark=0.0,
         skew=skewness,
         kurt=kurt_total,
@@ -144,9 +150,9 @@ def compute_dsr_verdict(
     pbo = compute_pbo(net_sharpe_tc, n_trials)
 
     # DSR verdict thresholds
-    if dsr > 0.95:
+    if dsr > DSR_ACCEPT_THRESHOLD:
         dsr_verdict = "accept"
-    elif dsr > 0.50:
+    elif dsr > DSR_MARGINAL_THRESHOLD:
         dsr_verdict = "marginal"
     else:
         dsr_verdict = "reject"
@@ -201,7 +207,6 @@ def _run_intelligence_layer(
     except ImportError:
         return {}
 
-    # Include leaderboard in prior iterations context
     enriched_summary = f"{prior_iterations_summary}\n\nLEADERBOARD:\n{leaderboard_summary}"
 
     result = call_intelligence_layer(
@@ -216,13 +221,17 @@ def _run_intelligence_layer(
     dsr = raw_numbers.get("dsr", 0.0)
     defaults = {
         "final_verdict": raw_numbers.get("dsr_verdict", "reject"),
-        "dsr_interpretation": f"DSR={dsr:.3f}. Verdict: {raw_numbers.get('dsr_verdict', 'reject')}.",
+        "dsr_interpretation": (
+            f"DSR={dsr:.3f}. Verdict: {raw_numbers.get('dsr_verdict', 'reject')}."
+        ),
         "pbo_interpretation": f"PBO={raw_numbers.get('pbo', 0.5):.2f}.",
         "quality_adjusted_verdict": raw_numbers.get("dsr_verdict", "reject"),
         "quality_adjustment_reason": "",
         "key_issues": [],
         "strengths": [],
-        "leaderboard_position": "new_leader" if raw_numbers.get("is_new_leader") else "middle",
+        "leaderboard_position": (
+            "new_leader" if raw_numbers.get("is_new_leader") else "middle"
+        ),
         "verdict_narrative": f"Strategy scored DSR={dsr:.3f} on this iteration.",
         "mutator_instruction": "Continue Bayesian search with GP recommendations.",
         "confidence": 0.6,
@@ -240,8 +249,10 @@ if __name__ == "__main__":
     print(f"Expected max SR: {exp_sr:.4f}")
     print(f"Trials penalty: {penalty:.4f}")
 
-    min_trl = compute_min_trl(sr_target=1.34 / np.sqrt(252), sr_benchmark=0.0,
-                              skew=-0.31, kurt=4.1 + 3)
+    min_trl = compute_min_trl(
+        sr_target=1.34 / np.sqrt(252), sr_benchmark=0.0,
+        skew=-0.31, kurt=4.1 + 3,
+    )
     print(f"Min TRL: {min_trl} days")
 
     pbo = compute_pbo(sr_hat=1.34, n_trials=23)

@@ -8,30 +8,25 @@ Intelligence layer: LLM assesses backtest quality and flags anomalies.
 
 import logging
 import os
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
 
+from constants import (
+    ANNUALIZATION_FACTOR,
+    CAPACITY_SEARCH_ITERATIONS,
+    CAPACITY_SEARCH_MAX,
+    CAPACITY_SEARCH_MIN,
+    DEFAULT_ADV_DOLLAR,
+    EPSILON,
+    MAX_TRADE_FRACTION,
+    RSI_ENTRY_THRESHOLD,
+    TRADE_IMPACT_EXPONENT,
+)
+from data_loader import load_prices
+
 logger = logging.getLogger(__name__)
-
-CACHE_DIR = "cache/"
-
-
-# ── Price loader (shared with agent1) ─────────────────────────────────────────
-
-def _load_prices(ticker: str, start: str, end: str) -> pd.DataFrame:
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    safe_ticker = ticker.replace("^", "IDX_")
-    cache_file = os.path.join(CACHE_DIR, f"prices_{safe_ticker}_{start}_{end}.csv")
-    if os.path.exists(cache_file):
-        return pd.read_csv(cache_file, index_col=0, parse_dates=True)
-    import yfinance as yf
-    df = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.droplevel(1)
-    df.to_csv(cache_file)
-    return df
 
 
 # ── Almgren-Chriss TC ─────────────────────────────────────────────────────────
@@ -45,9 +40,9 @@ def _compute_tc(
 ) -> float:
     if adv_dollar <= 0 or price <= 0:
         return commission_pct * 2
-    trade_size_frac = trade_value / (adv_dollar + 1e-9)
-    trade_size_frac = min(trade_size_frac, 1.0)
-    impact = slippage_lambda * (trade_size_frac ** 0.6)
+    trade_size_frac = trade_value / (adv_dollar + EPSILON)
+    trade_size_frac = min(trade_size_frac, MAX_TRADE_FRACTION)
+    impact = slippage_lambda * (trade_size_frac ** TRADE_IMPACT_EXPONENT)
     tc_one_way = commission_pct + impact
     return tc_one_way * 2  # entry + exit
 
@@ -86,14 +81,17 @@ def run_backtest(
     commission_pct = float(transaction_costs["commission_pct"])
     slippage_lambda = float(transaction_costs["slippage_lambda"])
 
-    df = _load_prices(ticker, start_date, end_date)
+    df = load_prices(ticker, start_date, end_date)
     if df is None or len(df) < max(sma_slow, 60):
         raise ValueError(f"Insufficient price data for {ticker}.")
 
     close = df["Close"].ffill()
     high = df["High"].ffill() if "High" in df.columns else close
     low = df["Low"].ffill() if "Low" in df.columns else close
-    volume = df["Volume"].fillna(0) if "Volume" in df.columns else pd.Series(0, index=close.index)
+    volume = (
+        df["Volume"].fillna(0) if "Volume" in df.columns
+        else pd.Series(0, index=close.index)
+    )
 
     # ── Indicators ────────────────────────────────────────────────────────────
     sma_f = close.rolling(sma_fast).mean()
@@ -106,7 +104,7 @@ def run_backtest(
         delta = close.diff()
         gain = delta.clip(lower=0).rolling(rsi_period).mean()
         loss = (-delta.clip(upper=0)).rolling(rsi_period).mean()
-        rs = gain / (loss + 1e-9)
+        rs = gain / (loss + EPSILON)
         rsi = 100 - (100 / (1 + rs))
 
     # Align signal series with price data
@@ -118,7 +116,7 @@ def run_backtest(
     # ── Entry condition ───────────────────────────────────────────────────────
     entry_signal = (
         (sma_f > sma_s)
-        & (rsi < 60)
+        & (rsi < RSI_ENTRY_THRESHOLD)
         & (sig > 0)
     )
 
@@ -140,7 +138,11 @@ def run_backtest(
         px_close = float(close.iloc[i])
         px_high = float(high.iloc[i])
         px_low = float(low.iloc[i])
-        adv_d = float(adv_21.iloc[i]) if not np.isnan(adv_21.iloc[i]) else (px_close * 1e6)
+        adv_d = (
+            float(adv_21.iloc[i])
+            if not np.isnan(adv_21.iloc[i])
+            else (px_close * DEFAULT_ADV_DOLLAR)
+        )
 
         trade_value = final_weight * portfolio_value
 
@@ -172,7 +174,9 @@ def run_backtest(
 
             if exit_reason:
                 gross_ret = (exit_price - entry_price) / entry_price
-                tc = _compute_tc(trade_value, adv_d, exit_price, commission_pct, slippage_lambda)
+                tc = _compute_tc(
+                    trade_value, adv_d, exit_price, commission_pct, slippage_lambda
+                )
                 net_ret = gross_ret - tc
                 portfolio_value *= (1.0 + final_weight * net_ret)
                 total_tc_paid += tc * trade_value
@@ -195,7 +199,8 @@ def run_backtest(
             # Entry
             if entry_signal.iloc[i]:
                 tc_entry = commission_pct + slippage_lambda * (
-                    min(trade_value / (adv_d + 1e-9), 1.0) ** 0.6
+                    min(trade_value / (adv_d + EPSILON), MAX_TRADE_FRACTION)
+                    ** TRADE_IMPACT_EXPONENT
                 )
                 portfolio_value *= (1.0 - final_weight * tc_entry)
                 total_tc_paid += tc_entry * trade_value
@@ -210,10 +215,15 @@ def run_backtest(
     if in_position and len(dates) > 0:
         last_i = n - 1
         px_close = float(close.iloc[last_i])
-        adv_d = float(adv_21.iloc[last_i]) if not np.isnan(adv_21.iloc[last_i]) else px_close
+        adv_d = (
+            float(adv_21.iloc[last_i])
+            if not np.isnan(adv_21.iloc[last_i])
+            else px_close
+        )
         gross_ret = (px_close - entry_price) / entry_price
         tc = _compute_tc(
-            final_weight * portfolio_value, adv_d, px_close, commission_pct, slippage_lambda
+            final_weight * portfolio_value, adv_d, px_close,
+            commission_pct, slippage_lambda,
         )
         net_ret = gross_ret - tc
         portfolio_value *= (1.0 + final_weight * net_ret)
@@ -234,9 +244,8 @@ def run_backtest(
     # ── Performance metrics ───────────────────────────────────────────────────
     daily_returns_bt = _equity_to_daily_returns(equity_curve)
 
-    gross_sharpe = _compute_sharpe(
-        [t["gross_return"] / max(t["days_held"], 1) for t in trade_log if trade_log]
-    )
+    # Both Sharpe ratios computed from daily returns for consistency
+    gross_sharpe = _compute_sharpe(daily_returns_bt)
     net_sharpe_tc = _compute_sharpe(daily_returns_bt)
 
     total_return = portfolio_value - 1.0
@@ -251,13 +260,13 @@ def run_backtest(
     )
 
     n_days = len(daily_returns_bt)
-    turnover_annual = (num_trades * 2 * final_weight) / max(n_days / 252.0, 1.0)
+    turnover_annual = (num_trades * 2 * final_weight) / max(n_days / ANNUALIZATION_FACTOR, 1.0)
 
     # ── Capacity estimate ─────────────────────────────────────────────────────
-    avg_adv = float(adv_21.dropna().mean()) if not adv_21.dropna().empty else 1e6
+    avg_adv = float(adv_21.dropna().mean()) if not adv_21.dropna().empty else DEFAULT_ADV_DOLLAR
     capacity_usd = _estimate_capacity(
         gross_sharpe, trade_log, avg_adv, final_weight,
-        commission_pct, slippage_lambda
+        commission_pct, slippage_lambda,
     )
 
     # Exit reason breakdown
@@ -275,7 +284,7 @@ def run_backtest(
         "num_trades": num_trades,
         "avg_holding_days": round(avg_holding, 2),
         "turnover_annual": round(turnover_annual, 2),
-        "total_tc_paid": round(total_tc_paid / max(portfolio_value, 1e-9), 6),
+        "total_tc_paid": round(total_tc_paid / max(portfolio_value, EPSILON), 6),
         "capacity_usd": round(capacity_usd, 0),
         "regime": regime,
         "exit_reasons": exit_reasons,
@@ -308,7 +317,7 @@ def _compute_sharpe(returns: list) -> float:
     arr = arr[np.isfinite(arr)]
     if len(arr) < 5 or np.std(arr) == 0:
         return 0.0
-    return float(np.mean(arr) / np.std(arr) * np.sqrt(252))
+    return float(np.mean(arr) / np.std(arr) * np.sqrt(ANNUALIZATION_FACTOR))
 
 
 def _compute_max_drawdown(equity_curve: list) -> float:
@@ -316,7 +325,7 @@ def _compute_max_drawdown(equity_curve: list) -> float:
         return 0.0
     arr = np.array(equity_curve)
     peak = np.maximum.accumulate(arr)
-    dd = (arr - peak) / (peak + 1e-9)
+    dd = (arr - peak) / (peak + EPSILON)
     return float(np.min(dd))
 
 
@@ -327,31 +336,30 @@ def _estimate_capacity(
     final_weight: float,
     commission_pct: float,
     slippage_lambda: float,
-    max_search: float = 10_000_000,
 ) -> float:
     if gross_sharpe <= 0 or not trade_log:
         return 0.0
 
     avg_net_ret = float(np.mean([t["net_return"] for t in trade_log]))
     avg_gross_ret = float(np.mean([t["gross_return"] for t in trade_log]))
-    gross_tc = avg_gross_ret - avg_net_ret  # TC at base scale
 
     def net_sharpe_at_aum(aum: float) -> float:
         trade_val = final_weight * aum
-        trade_frac = trade_val / (avg_adv_dollar + 1e-9)
-        trade_frac = min(trade_frac, 1.0)
-        impact = slippage_lambda * (trade_frac ** 0.6)
+        trade_frac = trade_val / (avg_adv_dollar + EPSILON)
+        trade_frac = min(trade_frac, MAX_TRADE_FRACTION)
+        impact = slippage_lambda * (trade_frac ** TRADE_IMPACT_EXPONENT)
         tc = (commission_pct + impact) * 2
-        # Sharpe scales roughly with (gross_ret - tc) / vol
-        vol_approx = abs(avg_gross_ret) / max(gross_sharpe / np.sqrt(252), 1e-6)
+        vol_approx = abs(avg_gross_ret) / max(
+            gross_sharpe / np.sqrt(ANNUALIZATION_FACTOR), 1e-6
+        )
         if vol_approx <= 0:
             return 0.0
         net_ret = avg_gross_ret - tc
-        return float(net_ret / vol_approx * np.sqrt(252))
+        return float(net_ret / vol_approx * np.sqrt(ANNUALIZATION_FACTOR))
 
     # Binary search for AUM where net_sharpe = 0
-    lo, hi = 1000.0, max_search
-    for _ in range(30):
+    lo, hi = CAPACITY_SEARCH_MIN, CAPACITY_SEARCH_MAX
+    for _ in range(CAPACITY_SEARCH_ITERATIONS):
         mid = (lo + hi) / 2
         if net_sharpe_at_aum(mid) > 0:
             lo = mid
@@ -382,11 +390,17 @@ def _run_intelligence_layer(
     net_sr = raw_numbers.get("net_sharpe_tc", 0.0)
     cap = raw_numbers.get("capacity_usd", 0.0)
     defaults = {
-        "backtest_quality": "clean" if 0 < net_sr < 1.5 else ("suspicious" if net_sr >= 1.5 else "poor"),
+        "backtest_quality": (
+            "clean" if 0 < net_sr < 1.5
+            else ("suspicious" if net_sr >= 1.5 else "poor")
+        ),
         "performance_narrative": f"Net Sharpe after TC: {net_sr:.2f}.",
         "stop_loss_behaviour": "appropriate",
         "drawdown_analysis": "distributed",
-        "capacity_verdict": "tradeable" if cap >= 50000 else ("marginal" if cap >= 10000 else "too_small"),
+        "capacity_verdict": (
+            "tradeable" if cap >= 50000
+            else ("marginal" if cap >= 10000 else "too_small")
+        ),
         "anomalies": [],
         "tc_drag_assessment": "acceptable",
         "recommendation_for_next_agent": "Proceed with statistical testing.",
@@ -423,7 +437,11 @@ if __name__ == "__main__":
         final_weight=0.10,
         signal_series=signal_fake,
         regime="bull",
-        transaction_costs={"commission_pct": 0.001, "slippage_lambda": 0.1, "adv_fraction": 0.01},
+        transaction_costs={
+            "commission_pct": 0.001,
+            "slippage_lambda": 0.1,
+            "adv_fraction": 0.01,
+        },
     )
     print(f"Net Sharpe TC: {result['net_sharpe_tc']:.3f}")
     print(f"Total return: {result['total_return']:.3f}")

@@ -18,6 +18,14 @@ from typing import Optional
 
 import yaml
 
+from constants import (
+    REGIME_BEAR_THRESHOLD,
+    REGIME_BULL_THRESHOLD,
+    REGIME_LOOKBACK_DAYS,
+    REGIME_MIN_DAYS,
+    REGIME_UPDATE_FREQUENCY,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -95,17 +103,75 @@ def update_last_csv_row(csv_path: str, **updates):
         writer.writerows(rows)
 
 
+# ── Config validation ─────────────────────────────────────────────────────────
+
+def validate_config(config: dict):
+    """Validate config.yaml contents. Raises ValueError on bad config."""
+    errors = []
+
+    # Required top-level keys
+    for key in ["stock", "ralph", "hyperparameter_space", "risk", "output"]:
+        if key not in config:
+            errors.append(f"Missing required config section: '{key}'")
+
+    if errors:
+        raise ValueError("Config validation failed:\n" + "\n".join(errors))
+
+    # Stock section
+    stock = config["stock"]
+    for key in ["ticker", "start_date", "end_date", "benchmark"]:
+        if key not in stock:
+            errors.append(f"Missing stock.{key}")
+
+    if not errors:
+        from datetime import datetime as dt
+        try:
+            start = dt.strptime(stock["start_date"], "%Y-%m-%d")
+            end = dt.strptime(stock["end_date"], "%Y-%m-%d")
+            if start >= end:
+                errors.append(
+                    f"start_date ({stock['start_date']}) must be before "
+                    f"end_date ({stock['end_date']})"
+                )
+        except ValueError as e:
+            errors.append(f"Invalid date format (use YYYY-MM-DD): {e}")
+
+    # Hyperparameter space bounds
+    space = config.get("hyperparameter_space", {})
+    sma_fast_bounds = space.get("sma_fast", [5, 50])
+    sma_slow_bounds = space.get("sma_slow", [20, 200])
+    if float(sma_fast_bounds[1]) >= float(sma_slow_bounds[0]):
+        logger.warning(
+            f"sma_fast upper bound ({sma_fast_bounds[1]}) overlaps with "
+            f"sma_slow lower bound ({sma_slow_bounds[0]}). "
+            f"Some random samples may require correction."
+        )
+
+    for key, bounds in space.items():
+        if not isinstance(bounds, list) or len(bounds) != 2:
+            errors.append(f"hyperparameter_space.{key} must be [min, max]")
+        elif float(bounds[0]) >= float(bounds[1]):
+            errors.append(
+                f"hyperparameter_space.{key}: min ({bounds[0]}) >= max ({bounds[1]})"
+            )
+
+    if errors:
+        raise ValueError("Config validation failed:\n" + "\n".join(errors))
+
+    logger.info("Config validation: OK")
+
+
 # ── Regime detection ──────────────────────────────────────────────────────────
 
 def compute_regime(daily_returns: list) -> str:
     import numpy as np
-    if not daily_returns or len(daily_returns) < 20:
+    if not daily_returns or len(daily_returns) < REGIME_MIN_DAYS:
         return "unknown"
-    arr = np.array(daily_returns[-60:])
+    arr = np.array(daily_returns[-REGIME_LOOKBACK_DAYS:])
     total_ret = float(np.prod(1 + arr) - 1) * (252 / len(arr))
-    if total_ret > 0.10:
+    if total_ret > REGIME_BULL_THRESHOLD:
         return "bull"
-    elif total_ret < -0.10:
+    elif total_ret < REGIME_BEAR_THRESHOLD:
         return "bear"
     return "sideways"
 
@@ -192,6 +258,8 @@ def run_ralph_loop(config_path: str = "config.yaml"):
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
+    validate_config(config)
+
     ticker = config["stock"]["ticker"]
     start_date = config["stock"]["start_date"]
     end_date = config["stock"]["end_date"]
@@ -209,8 +277,60 @@ def run_ralph_loop(config_path: str = "config.yaml"):
     loop_start = time.time()
     halt_reason_final = "unknown"
 
+    # ── Walk-forward: determine train period ──────────────────────────────────
+    wf_config = config.get("walk_forward", {})
+    wf_enabled = wf_config.get("enabled", False)
+    train_start = start_date
+    train_end = end_date
+
+    if wf_enabled:
+        from walk_forward import compute_splits
+        wf_splits = compute_splits(
+            start_date=start_date,
+            end_date=end_date,
+            n_folds=wf_config.get("n_folds", 3),
+            mode=wf_config.get("mode", "single"),
+            test_ratio=wf_config.get("test_ratio", 0.20),
+        )
+        if wf_splits:
+            # RALPH loop runs on TRAIN period only
+            train_start = wf_splits[0].train_start
+            train_end = wf_splits[0].train_end
+            logger.info(f"Walk-forward ENABLED: train=[{train_start} → {train_end}]")
+            for s in wf_splits:
+                logger.info(f"  Fold {s.fold}: test=[{s.test_start} → {s.test_end}]")
+        else:
+            wf_enabled = False
+            logger.warning("Walk-forward: no valid splits generated. Running on full period.")
+    else:
+        logger.info("Walk-forward: disabled. Running on full period.")
+
+    # ── Sentiment config ──────────────────────────────────────────────────────
+    sentiment_config = config.get("sentiment", {})
+    sentiment_enabled = sentiment_config.get("enabled", False)
+    if sentiment_enabled:
+        logger.info("Sentiment signal: ENABLED")
+    else:
+        logger.info("Sentiment signal: disabled")
+
+    # ── Sheets logger ────────────────────────────────────────────────────────
+    sheets_config = config.get("sheets_logger", {})
+    sheets_logger = None
+    if sheets_config.get("enabled", False):
+        try:
+            from sheets_logger import SheetsLogger
+            sheets_logger = SheetsLogger(
+                spreadsheet_id=sheets_config["spreadsheet_id"],
+                sheet_name=sheets_config.get("sheet_name", "RALPH Results"),
+            )
+            logger.info("Sheets logger: ENABLED")
+        except Exception as e:
+            logger.warning(f"Sheets logger: init failed — {e}")
+    else:
+        logger.info("Sheets logger: disabled")
+
     logger.info(f"Starting RALPH loop from iteration {iteration}")
-    logger.info(f"Ticker: {ticker} | Period: {start_date} to {end_date}")
+    logger.info(f"Ticker: {ticker} | Period: {train_start} to {train_end}")
 
     while True:
         iter_start = time.time()
@@ -247,15 +367,39 @@ def run_ralph_loop(config_path: str = "config.yaml"):
             }
             prior_summary = memory.get_prior_iterations_summary(last_n=5)
 
-            # ── A: ASSESS — pipeline stages 1→4→5 ──────────────────────────
+            # ── A: ASSESS — pipeline stages 0→1→2→3→4→5 ─────────────────────
+
+            # Stage 0: Sentiment (optional)
+            sentiment_out = None
+            if sentiment_enabled:
+                logger.info("  A: Stage 0 — sentiment")
+                try:
+                    from agents.agent0_sentiment import compute_sentiment
+                    sentiment_out = compute_sentiment(
+                        ticker=ticker,
+                        start_date=train_start,
+                        end_date=train_end,
+                        sentiment_history=getattr(memory, 'sentiment_history', []),
+                        accumulated_context=accumulated_context,
+                        prior_iterations_summary=prior_summary,
+                    )
+                    accumulated_context["agent0"] = sentiment_out.get("insight", {})
+                    logger.info(
+                        f"     sentiment={sentiment_out['sentiment_score']:.3f} "
+                        f"({sentiment_out['sentiment_label']}) "
+                        f"headlines={sentiment_out['n_headlines']}"
+                    )
+                except Exception as e:
+                    logger.warning(f"     Sentiment failed: {e}. Continuing without.")
+                    sentiment_out = None
 
             # Stage 1: Signal
             logger.info("  A: Stage 1 — signal")
             from agents.agent1_signal import compute_signal
             sig_out = compute_signal(
                 ticker=ticker,
-                start_date=start_date,
-                end_date=end_date,
+                start_date=train_start,
+                end_date=train_end,
                 params=params,
                 benchmark=benchmark,
                 ic_history=memory.ic_history,
@@ -286,8 +430,8 @@ def run_ralph_loop(config_path: str = "config.yaml"):
             from agents.agent3_backtest import run_backtest
             bt_out = run_backtest(
                 ticker=ticker,
-                start_date=start_date,
-                end_date=end_date,
+                start_date=train_start,
+                end_date=train_end,
                 params=params,
                 stop_loss_used=siz_out["stop_loss_used"],
                 final_weight=siz_out["final_weight"],
@@ -363,7 +507,7 @@ def run_ralph_loop(config_path: str = "config.yaml"):
             })
 
             # Update regime every 10 iterations
-            if iteration % 10 == 0:
+            if iteration % REGIME_UPDATE_FREQUENCY == 0:
                 regime_label = compute_regime(bt_out["daily_returns"])
                 memory.regime_history.append(regime_label)
                 logger.info(f"     Regime update: {regime_label}")
@@ -371,6 +515,7 @@ def run_ralph_loop(config_path: str = "config.yaml"):
             # Save LLM narratives
             narrative_entry = {
                 "iter": iteration,
+                "agent0": sentiment_out.get("insight", {}) if sentiment_out else {},
                 "agent1": sig_out.get("insight", {}),
                 "agent2": siz_out.get("insight", {}),
                 "agent3": bt_out.get("insight", {}),
@@ -478,8 +623,20 @@ def run_ralph_loop(config_path: str = "config.yaml"):
                 "agent6_selection_rationale": a6_insight.get("selection_rationale",
                                               mutator_out.get("selection_rationale", "")),
             }
+
+            # Inject sentiment data if available
+            if sentiment_out:
+                row["sentiment_score"] = sentiment_out.get("sentiment_score", "")
+                row["sentiment_label"] = sentiment_out.get("sentiment_label", "")
+                row["n_headlines"] = sentiment_out.get("n_headlines", "")
+                row["agent0_sentiment_label"] = sentiment_out.get("sentiment_label", "")
+
             append_csv_row(csv_path, row)
             logger.info(f"  CSV row written (iter {iteration})")
+
+            # Log to Google Sheets
+            if sheets_logger:
+                sheets_logger.log_iteration(row)
 
             # ── H: HALT ─────────────────────────────────────────────────────
             halt, halt_reason = check_halt(memory, config, iteration)
@@ -510,9 +667,96 @@ def run_ralph_loop(config_path: str = "config.yaml"):
 
     if memory.leaderboard:
         best = memory.leaderboard[0]
-        logger.info(f"\nBest strategy: DSR={best.get('dsr', 0):.3f}  params={best.get('params', {})}")
+        logger.info(f"\nBest strategy (in-sample): DSR={best.get('dsr', 0):.3f}  params={best.get('params', {})}")
+
+    # ── Walk-Forward OOS Validation ───────────────────────────────────────────
+    if wf_enabled and memory.leaderboard:
+        logger.info(f"\n{'='*50}")
+        logger.info("  WALK-FORWARD OUT-OF-SAMPLE VALIDATION")
+        logger.info(f"{'='*50}")
+
+        from walk_forward import validate_leaderboard
+        top_n = wf_config.get("top_n_validate", 5)
+        oos_results = validate_leaderboard(
+            leaderboard=memory.leaderboard,
+            splits=wf_splits,
+            ticker=ticker,
+            benchmark=benchmark,
+            config=config,
+            top_n=top_n,
+        )
+
+        # Log OOS results
+        for r in oos_results:
+            logger.info(
+                f"  Rank {r['rank']}: IS DSR={r['is_dsr']:.3f} → "
+                f"OOS DSR={r['oos_avg_dsr']:.3f} | "
+                f"IS Sharpe={r['is_sharpe']:.3f} → "
+                f"OOS Sharpe={r['oos_avg_sharpe']:.3f} | "
+                f"Degradation={r['sharpe_degradation_pct']:.1f}% | "
+                f"Verdict: {r['oos_verdict'].upper()}"
+            )
+
+        # Save OOS results to memory
+        import json
+        oos_path = os.path.join(memory_dir, "oos_validation.json")
+        with open(oos_path, "w") as f:
+            json.dump(oos_results, f, indent=2, default=str)
+        logger.info(f"  OOS results saved to {oos_path}")
+
+        # Update final report with OOS findings
+        _append_oos_to_report(
+            report_path=config["output"]["report_path"],
+            oos_results=oos_results,
+        )
+
+        # Log OOS to Google Sheets
+        if sheets_logger:
+            sheets_logger.log_oos_results(oos_results)
+
     logger.info(f"Results written to: {csv_path}")
     logger.info(f"Total runtime: {int(total_runtime // 60)}m {int(total_runtime % 60)}s")
+
+
+def _append_oos_to_report(report_path: str, oos_results: list):
+    """Append OOS validation results to the final report."""
+    lines = [
+        "",
+        "=" * 60,
+        "OUT-OF-SAMPLE WALK-FORWARD VALIDATION",
+        "=" * 60,
+        "",
+    ]
+
+    for r in oos_results:
+        verdict_emoji = {
+            "confirmed": "CONFIRMED",
+            "degraded": "DEGRADED",
+            "failed": "FAILED",
+        }.get(r["oos_verdict"], "UNKNOWN")
+
+        lines.extend([
+            f"Rank {r['rank']}: {verdict_emoji}",
+            f"  In-sample:      DSR={r['is_dsr']:.3f}  Sharpe={r['is_sharpe']:.3f}",
+            f"  Out-of-sample:  DSR={r['oos_avg_dsr']:.3f}  Sharpe={r['oos_avg_sharpe']:.3f}",
+            f"  Degradation:    {r['sharpe_degradation_pct']:.1f}%",
+            f"  Folds tested:   {r['n_folds_tested']}",
+            "",
+        ])
+
+    confirmed = [r for r in oos_results if r["oos_verdict"] == "confirmed"]
+    if confirmed:
+        lines.append(f"STRATEGIES CONFIRMED OUT-OF-SAMPLE: {len(confirmed)}")
+    else:
+        lines.append("WARNING: No strategies confirmed out-of-sample.")
+
+    lines.append("=" * 60)
+
+    try:
+        with open(report_path, "a") as f:
+            f.write("\n".join(lines))
+    except Exception:
+        pass
 
 
 # ── CLI entrypoint ────────────────────────────────────────────────────────────

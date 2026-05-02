@@ -9,9 +9,17 @@ Intelligence layer: LLM selects one candidate and provides rationale.
 
 import logging
 import random
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
+
+from constants import (
+    GP_MAX_CANDIDATE_ATTEMPTS,
+    GP_MIN_OBSERVATIONS_FOR_TRUST,
+    GP_N_CANDIDATES,
+    GP_N_INITIAL_POINTS,
+    PRUNE_SIMILARITY_THRESHOLD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,17 +34,19 @@ PARAM_KEYS = [
     "kelly_fraction",
 ]
 
+INTEGER_PARAMS = {"holding_days", "sma_fast", "sma_slow", "rsi_period"}
+
 
 # ── Search space builder ──────────────────────────────────────────────────────
 
 def _build_skopt_space(space_config: dict):
-    from skopt.space import Real, Integer
+    from skopt.space import Integer, Real
 
     dims = []
     for key in PARAM_KEYS:
         bounds = space_config.get(key, [0.01, 0.1])
         lo, hi = float(bounds[0]), float(bounds[1])
-        if key in ("holding_days", "sma_fast", "sma_slow", "rsi_period"):
+        if key in INTEGER_PARAMS:
             dims.append(Integer(int(lo), int(hi), name=key))
         else:
             dims.append(Real(lo, hi, name=key))
@@ -46,8 +56,7 @@ def _build_skopt_space(space_config: dict):
 def _x_to_params(x: list, space_config: dict) -> dict:
     params = {}
     for i, key in enumerate(PARAM_KEYS):
-        bounds = space_config.get(key, [0.01, 0.1])
-        if key in ("holding_days", "sma_fast", "sma_slow", "rsi_period"):
+        if key in INTEGER_PARAMS:
             params[key] = int(round(x[i]))
         else:
             params[key] = float(x[i])
@@ -68,7 +77,7 @@ def _random_params(space_config: dict, rng) -> dict:
     for key in PARAM_KEYS:
         bounds = space_config.get(key, [0.01, 0.1])
         lo, hi = float(bounds[0]), float(bounds[1])
-        if key in ("holding_days", "sma_fast", "sma_slow", "rsi_period"):
+        if key in INTEGER_PARAMS:
             params[key] = int(rng.integers(int(lo), int(hi) + 1))
         else:
             params[key] = float(rng.uniform(lo, hi))
@@ -83,7 +92,7 @@ def _random_params(space_config: dict, rng) -> dict:
 def _gp_propose_candidates(
     gp_observations: list,
     space_config: dict,
-    n_candidates: int = 3,
+    n_candidates: int = GP_N_CANDIDATES,
     pruned_params: list = None,
     memory=None,
 ) -> tuple:
@@ -105,7 +114,7 @@ def _gp_propose_candidates(
         dimensions=dims,
         base_estimator="GP",
         acq_func="EI",
-        n_initial_points=5,
+        n_initial_points=GP_N_INITIAL_POINTS,
         random_state=42,
     )
 
@@ -120,12 +129,11 @@ def _gp_propose_candidates(
             logger.debug(f"GP tell failed for obs: {e}")
 
     # Ask for multiple candidates
-    max_attempts = 50
     candidates = []
     ei_scores = []
     seen = set()
 
-    for _ in range(max_attempts):
+    for _ in range(GP_MAX_CANDIDATE_ATTEMPTS):
         if len(candidates) >= n_candidates:
             break
         try:
@@ -143,17 +151,7 @@ def _gp_propose_candidates(
             if memory and memory.is_pruned(params):
                 continue
             # Check against already-pruned list directly
-            is_pruned = False
-            for pp in pruned_params:
-                diffs = []
-                for k in PARAM_KEYS:
-                    v1, v2 = float(params.get(k, 0)), float(pp.get(k, 0))
-                    mx = max(abs(v1), abs(v2))
-                    if mx > 0:
-                        diffs.append(abs(v1 - v2) / mx)
-                if diffs and max(diffs) < 0.08:
-                    is_pruned = True
-                    break
+            is_pruned = _is_near_pruned(params, pruned_params)
             if is_pruned:
                 continue
             seen.add(key)
@@ -167,6 +165,20 @@ def _gp_propose_candidates(
                 ei_scores.append(0.0)
 
     return candidates, ei_scores
+
+
+def _is_near_pruned(params: dict, pruned_params: list) -> bool:
+    """Check if params are too similar to any pruned parameter set."""
+    for pp in pruned_params:
+        diffs = []
+        for k in PARAM_KEYS:
+            v1, v2 = float(params.get(k, 0)), float(pp.get(k, 0))
+            mx = max(abs(v1), abs(v2))
+            if mx > 0:
+                diffs.append(abs(v1 - v2) / mx)
+        if diffs and max(diffs) < PRUNE_SIMILARITY_THRESHOLD:
+            return True
+    return False
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -193,10 +205,10 @@ def propose_params(
     rng = np.random.default_rng(iteration)
 
     # ── Iteration 1 or too few observations: random ───────────────────────────
-    if len(gp_observations) < 3:
+    if len(gp_observations) < GP_MIN_OBSERVATIONS_FOR_TRUST:
         params = _random_params(space, rng)
         # Ensure not pruned
-        for _ in range(50):
+        for _ in range(GP_MAX_CANDIDATE_ATTEMPTS):
             if not (memory and memory.is_pruned(params)):
                 break
             params = _random_params(space, rng)
@@ -213,7 +225,7 @@ def propose_params(
     candidates, ei_scores = _gp_propose_candidates(
         gp_observations=gp_observations,
         space_config=space,
-        n_candidates=3,
+        n_candidates=GP_N_CANDIDATES,
         pruned_params=pruned_params,
         memory=memory,
     )
@@ -229,12 +241,12 @@ def propose_params(
             "insight": {},
         }
 
-    # Pad to exactly 3 if fewer returned
-    while len(candidates) < 3:
+    # Pad to exactly N if fewer returned
+    while len(candidates) < GP_N_CANDIDATES:
         candidates.append(_random_params(space, rng))
         ei_scores.append(0.0)
-    candidates = candidates[:3]
-    ei_scores = ei_scores[:3]
+    candidates = candidates[:GP_N_CANDIDATES]
+    ei_scores = ei_scores[:GP_N_CANDIDATES]
 
     # ── Intelligence layer: LLM picks one candidate ───────────────────────────
     insight = _run_intelligence_layer(
@@ -256,7 +268,6 @@ def propose_params(
     if insight.get("gp_override") and insight.get("override_params"):
         override = insight["override_params"]
         if isinstance(override, dict):
-            # Validate all keys present
             valid = all(k in override for k in PARAM_KEYS)
             if valid:
                 return {
@@ -274,7 +285,9 @@ def propose_params(
         "proposed_params": selected_params,
         "acquisition_value": round(float(selected_ei), 4),
         "is_random": False,
-        "selection_rationale": insight.get("selection_rationale", f"GP candidate {selected_idx}."),
+        "selection_rationale": insight.get(
+            "selection_rationale", f"GP candidate {selected_idx}."
+        ),
         "insight": insight,
     }
 
@@ -285,7 +298,7 @@ def _validate_params(params: dict, space: dict) -> dict:
         bounds = space.get(key, [0.01, 0.1])
         lo, hi = float(bounds[0]), float(bounds[1])
         v = params.get(key, (lo + hi) / 2)
-        if key in ("holding_days", "sma_fast", "sma_slow", "rsi_period"):
+        if key in INTEGER_PARAMS:
             valid[key] = int(np.clip(round(float(v)), int(lo), int(hi)))
         else:
             valid[key] = float(np.clip(float(v), lo, hi))
@@ -313,7 +326,13 @@ def _run_intelligence_layer(
 
     computed_numbers = {
         "gp_candidates": [
-            {"index": i, "params": c, "ei_score": round(ei_scores[i] if i < len(ei_scores) else 0.0, 4)}
+            {
+                "index": i,
+                "params": c,
+                "ei_score": round(
+                    ei_scores[i] if i < len(ei_scores) else 0.0, 4
+                ),
+            }
             for i, c in enumerate(candidates)
         ],
         "n_gp_observations": n_observations,

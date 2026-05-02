@@ -10,6 +10,18 @@ import warnings
 
 import numpy as np
 
+from constants import (
+    ANNUALIZATION_FACTOR,
+    FINAL_WEIGHT_MAX,
+    FINAL_WEIGHT_MIN,
+    GARCH_MIN_OBSERVATIONS,
+    GARCH_MIN_SIGMA,
+    GARCH_ROLLING_FALLBACK_WINDOW,
+    KELLY_MAX_APPLIED,
+    KELLY_MAX_FULL,
+    VOL_TARGET_MAX_WEIGHT,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -37,38 +49,42 @@ def compute_sizing(
     base_stop_pct = float(params.get("stop_loss_pct", 0.02))
 
     # ── Kelly fraction ────────────────────────────────────────────────────────
-    annualized_alpha = factor_alpha * 252
-    annualized_var = float(np.var(returns)) * 252 if len(returns) > 10 else 0.04
+    annualized_alpha = factor_alpha * ANNUALIZATION_FACTOR
+    annualized_var = (
+        float(np.var(returns)) * ANNUALIZATION_FACTOR if len(returns) > 10 else 0.04
+    )
 
     if annualized_var > 0 and annualized_alpha > 0:
         kelly_full = annualized_alpha / annualized_var
     else:
         kelly_full = 0.0
 
-    kelly_full = float(np.clip(kelly_full, 0.0, 5.0))
+    kelly_full = float(np.clip(kelly_full, 0.0, KELLY_MAX_FULL))
     kelly_applied = kelly_full * kelly_fraction_param
-    kelly_applied = float(np.clip(kelly_applied, 0.0, 1.0))
+    kelly_applied = float(np.clip(kelly_applied, 0.0, KELLY_MAX_APPLIED))
 
     # ── GARCH(1,1) re-fit ─────────────────────────────────────────────────────
     new_garch_sigma = garch_sigma
-    if len(returns) >= 100:
+    if len(returns) >= GARCH_MIN_OBSERVATIONS:
         new_garch_sigma = _fit_garch(returns, fallback_sigma=garch_sigma)
     else:
-        new_garch_sigma = float(np.std(returns[-50:])) if len(returns) >= 10 else garch_sigma
+        new_garch_sigma = (
+            float(np.std(returns[-50:])) if len(returns) >= 10 else garch_sigma
+        )
 
-    new_garch_sigma = max(new_garch_sigma, 1e-4)
+    new_garch_sigma = max(new_garch_sigma, GARCH_MIN_SIGMA)
 
     # ── Volatility-targeting weight ───────────────────────────────────────────
-    realized_vol_ann = new_garch_sigma * np.sqrt(252)
+    realized_vol_ann = new_garch_sigma * np.sqrt(ANNUALIZATION_FACTOR)
     if realized_vol_ann > 0:
         vol_target_weight = vol_target_pct / realized_vol_ann
     else:
         vol_target_weight = 1.0
-    vol_target_weight = float(np.clip(vol_target_weight, 0.0, 2.0))
+    vol_target_weight = float(np.clip(vol_target_weight, 0.0, VOL_TARGET_MAX_WEIGHT))
 
     # ── Final weight ──────────────────────────────────────────────────────────
     final_weight = min(kelly_applied, vol_target_weight)
-    final_weight = float(np.clip(final_weight, 0.01, 1.0))
+    final_weight = float(np.clip(final_weight, FINAL_WEIGHT_MIN, FINAL_WEIGHT_MAX))
 
     # ── Dynamic stop-loss ─────────────────────────────────────────────────────
     stop_loss_dynamic = dynamic_stop_multiplier * new_garch_sigma
@@ -109,7 +125,11 @@ def _fit_garch(returns: np.ndarray, fallback_sigma: float = 0.02) -> float:
             return sigma_pct / 100.0
     except Exception as e:
         logger.warning(f"GARCH fit failed: {e}. Using rolling std fallback.")
-        return float(np.std(returns[-60:])) if len(returns) >= 60 else fallback_sigma
+        return (
+            float(np.std(returns[-GARCH_ROLLING_FALLBACK_WINDOW:]))
+            if len(returns) >= GARCH_ROLLING_FALLBACK_WINDOW
+            else fallback_sigma
+        )
 
 
 def _run_intelligence_layer(

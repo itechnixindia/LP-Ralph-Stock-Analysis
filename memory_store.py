@@ -1,10 +1,23 @@
-import os
+"""
+Persistent memory shared across all agents and RALPH iterations.
+Loaded at loop start, saved after every L stage.
+
+All persistence uses JSON — no pickle, eliminating arbitrary code execution risk.
+"""
+
 import json
-import pickle
 import logging
+import os
 from typing import Optional
 
+from constants import PRUNE_SIMILARITY_THRESHOLD
+
 logger = logging.getLogger(__name__)
+
+PARAM_KEYS = [
+    "stop_loss_pct", "take_profit_pct", "holding_days", "sma_fast",
+    "sma_slow", "rsi_period", "vol_target_pct", "kelly_fraction",
+]
 
 
 class MemoryStore:
@@ -25,98 +38,132 @@ class MemoryStore:
         self.regime_history: list = []
         self.narrative_history: list = []
 
-    # ── Persistence ──────────────────────────────────────────────────────────
+    # ── Persistence (JSON-only — no pickle) ──────────────────────────────────
 
     def save(self):
         os.makedirs(self.memory_dir, exist_ok=True)
 
-        with open(os.path.join(self.memory_dir, "gp_state.pkl"), "wb") as f:
-            pickle.dump(
-                {
-                    "gp_observations": self.gp_observations,
-                    "n_trials": self.n_trials,
-                    "dsr_history": self.dsr_history,
-                },
-                f,
-            )
+        self._write_json("gp_state.json", {
+            "gp_observations": self.gp_observations,
+            "n_trials": self.n_trials,
+            "dsr_history": self.dsr_history,
+        })
 
-        with open(os.path.join(self.memory_dir, "garch_state.pkl"), "wb") as f:
-            pickle.dump({"garch_sigma": self.garch_sigma}, f)
+        self._write_json("garch_state.json", {
+            "garch_sigma": self.garch_sigma,
+        })
 
-        with open(os.path.join(self.memory_dir, "pruned.json"), "w") as f:
-            json.dump({"pruned_params": self.pruned_params}, f)
+        self._write_json("pruned.json", {
+            "pruned_params": self.pruned_params,
+        })
 
-        with open(os.path.join(self.memory_dir, "leaderboard.json"), "w") as f:
-            json.dump(self.leaderboard, f, indent=2)
+        self._write_json("leaderboard.json", self.leaderboard)
 
-        with open(os.path.join(self.memory_dir, "ic_history.json"), "w") as f:
-            json.dump(
-                {
-                    "ic_history": self.ic_history,
-                    "regime_history": self.regime_history,
-                },
-                f,
-            )
+        self._write_json("ic_history.json", {
+            "ic_history": self.ic_history,
+            "regime_history": self.regime_history,
+        })
 
-        with open(os.path.join(self.memory_dir, "narrative_history.json"), "w") as f:
-            json.dump({"narratives": self.narrative_history}, f, indent=2)
+        self._write_json("narrative_history.json", {
+            "narratives": self.narrative_history,
+        })
 
     def load(self):
         if not os.path.exists(self.memory_dir):
             return
 
-        gp_path = os.path.join(self.memory_dir, "gp_state.pkl")
-        if os.path.exists(gp_path):
-            with open(gp_path, "rb") as f:
-                data = pickle.load(f)
-            self.gp_observations = data.get("gp_observations", [])
-            self.n_trials = data.get("n_trials", 0)
-            self.dsr_history = data.get("dsr_history", [])
+        # ── Migrate from legacy pickle files ─────────────────────────────────
+        self._migrate_pickle_to_json()
 
-        garch_path = os.path.join(self.memory_dir, "garch_state.pkl")
-        if os.path.exists(garch_path):
-            with open(garch_path, "rb") as f:
-                data = pickle.load(f)
-            self.garch_sigma = data.get("garch_sigma", {})
+        # ── Load JSON files ──────────────────────────────────────────────────
+        gp_data = self._read_json("gp_state.json")
+        if gp_data:
+            self.gp_observations = gp_data.get("gp_observations", [])
+            self.n_trials = gp_data.get("n_trials", 0)
+            self.dsr_history = gp_data.get("dsr_history", [])
 
-        pruned_path = os.path.join(self.memory_dir, "pruned.json")
-        if os.path.exists(pruned_path):
-            with open(pruned_path, "r") as f:
-                data = json.load(f)
-            self.pruned_params = data.get("pruned_params", [])
+        garch_data = self._read_json("garch_state.json")
+        if garch_data:
+            self.garch_sigma = garch_data.get("garch_sigma", {})
 
-        leaderboard_path = os.path.join(self.memory_dir, "leaderboard.json")
-        if os.path.exists(leaderboard_path):
-            with open(leaderboard_path, "r") as f:
-                self.leaderboard = json.load(f)
+        pruned_data = self._read_json("pruned.json")
+        if pruned_data:
+            self.pruned_params = pruned_data.get("pruned_params", [])
 
-        ic_path = os.path.join(self.memory_dir, "ic_history.json")
-        if os.path.exists(ic_path):
-            with open(ic_path, "r") as f:
-                data = json.load(f)
-            self.ic_history = data.get("ic_history", [])
-            self.regime_history = data.get("regime_history", [])
+        leaderboard_data = self._read_json("leaderboard.json")
+        if leaderboard_data is not None:
+            self.leaderboard = leaderboard_data if isinstance(leaderboard_data, list) else []
 
-        narrative_path = os.path.join(self.memory_dir, "narrative_history.json")
-        if os.path.exists(narrative_path):
-            with open(narrative_path, "r") as f:
-                data = json.load(f)
-            self.narrative_history = data.get("narratives", [])
+        ic_data = self._read_json("ic_history.json")
+        if ic_data:
+            self.ic_history = ic_data.get("ic_history", [])
+            self.regime_history = ic_data.get("regime_history", [])
+
+        narrative_data = self._read_json("narrative_history.json")
+        if narrative_data:
+            self.narrative_history = narrative_data.get("narratives", [])
+
+    def _write_json(self, filename: str, data):
+        path = os.path.join(self.memory_dir, filename)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, default=str)
+
+    def _read_json(self, filename: str):
+        path = os.path.join(self.memory_dir, filename)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Failed to read {path}: {e}")
+            return None
+
+    def _migrate_pickle_to_json(self):
+        """One-time migration from legacy .pkl files to .json equivalents."""
+        import pickle
+
+        migrated = False
+
+        gp_pkl = os.path.join(self.memory_dir, "gp_state.pkl")
+        gp_json = os.path.join(self.memory_dir, "gp_state.json")
+        if os.path.exists(gp_pkl) and not os.path.exists(gp_json):
+            try:
+                with open(gp_pkl, "rb") as f:
+                    data = pickle.load(f)
+                self._write_json("gp_state.json", data)
+                os.rename(gp_pkl, gp_pkl + ".bak")
+                migrated = True
+            except Exception as e:
+                logger.warning(f"Could not migrate {gp_pkl}: {e}")
+
+        garch_pkl = os.path.join(self.memory_dir, "garch_state.pkl")
+        garch_json = os.path.join(self.memory_dir, "garch_state.json")
+        if os.path.exists(garch_pkl) and not os.path.exists(garch_json):
+            try:
+                with open(garch_pkl, "rb") as f:
+                    data = pickle.load(f)
+                self._write_json("garch_state.json", data)
+                os.rename(garch_pkl, garch_pkl + ".bak")
+                migrated = True
+            except Exception as e:
+                logger.warning(f"Could not migrate {garch_pkl}: {e}")
+
+        if migrated:
+            logger.info("Migrated legacy pickle files to JSON. Old files renamed to .bak")
 
     # ── Pruning ───────────────────────────────────────────────────────────────
 
     def is_pruned(self, params: dict) -> bool:
-        for pruned in self.pruned_params:
-            if self._params_similar(params, pruned):
-                return True
-        return False
+        return any(
+            self._params_similar(params, pruned)
+            for pruned in self.pruned_params
+        )
 
-    def _params_similar(self, p1: dict, p2: dict, threshold: float = 0.08) -> bool:
-        keys = [
-            "stop_loss_pct", "take_profit_pct", "holding_days", "sma_fast",
-            "sma_slow", "rsi_period", "vol_target_pct", "kelly_fraction",
-        ]
-        for k in keys:
+    def _params_similar(
+        self, p1: dict, p2: dict, threshold: float = PRUNE_SIMILARITY_THRESHOLD
+    ) -> bool:
+        for k in PARAM_KEYS:
             v1 = float(p1.get(k, 0))
             v2 = float(p2.get(k, 0))
             max_v = max(abs(v1), abs(v2))

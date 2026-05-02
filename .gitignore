@@ -1,0 +1,41 @@
+# Credentials — NEVER commit these
+credentials/
+*.json
+!config.yaml
+
+# Allow specific JSON files in memory/
+!memory/*.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Cache
+cache/
+
+# Memory state (auto-generated)
+memory/
+
+# Output
+results.csv
+final_report.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Virtual env
+venv/
+.venv/
+env/

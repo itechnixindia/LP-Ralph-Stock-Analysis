@@ -12,6 +12,16 @@ from typing import List
 import numpy as np
 from scipy import stats
 
+from constants import (
+    ANNUALIZATION_FACTOR,
+    BOOTSTRAP_SAMPLES,
+    BOOTSTRAP_SEED,
+    EPSILON,
+    MIN_RETURNS_FOR_BOOTSTRAP,
+    MIN_RETURNS_FOR_STATS,
+    OMEGA_CAPPED_VALUE,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,7 +35,7 @@ def run_stats(
     regime: str = "unknown",
     alpha_level: float = 0.05,
     cvar_confidence: float = 0.95,
-    n_bootstrap: int = 10000,
+    n_bootstrap: int = BOOTSTRAP_SAMPLES,
     accumulated_context: dict = None,
     prior_iterations_summary: str = "",
 ) -> dict:
@@ -37,7 +47,7 @@ def run_stats(
     arr = np.array(daily_returns, dtype=float)
     arr = arr[np.isfinite(arr)]
 
-    if len(arr) < 20:
+    if len(arr) < MIN_RETURNS_FOR_STATS:
         return _empty_stats(regime)
 
     # ── Normality test ────────────────────────────────────────────────────────
@@ -73,7 +83,9 @@ def run_stats(
     regime_sharpe = net_sharpe_tc
     regime_win_rate = 0.0
     if trade_log:
-        regime_win_rate = sum(1 for t in trade_log if t.get("net_return", 0) > 0) / len(trade_log)
+        regime_win_rate = (
+            sum(1 for t in trade_log if t.get("net_return", 0) > 0) / len(trade_log)
+        )
 
     raw_numbers = {
         "jarque_bera_stat": round(float(jb_stat), 4),
@@ -108,17 +120,17 @@ def run_stats(
 
 
 def _bootstrap_sharpe_ci(
-    arr: np.ndarray, n_bootstrap: int = 10000
+    arr: np.ndarray, n_bootstrap: int = BOOTSTRAP_SAMPLES
 ) -> tuple:
-    if len(arr) < 10:
+    if len(arr) < MIN_RETURNS_FOR_BOOTSTRAP:
         return 0.0, 0.0
     sharpes = []
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(BOOTSTRAP_SEED)
     for _ in range(n_bootstrap):
         sample = rng.choice(arr, size=len(arr), replace=True)
         std = np.std(sample)
         if std > 0:
-            sharpes.append(float(np.mean(sample) / std * np.sqrt(252)))
+            sharpes.append(float(np.mean(sample) / std * np.sqrt(ANNUALIZATION_FACTOR)))
     if not sharpes:
         return 0.0, 0.0
     return float(np.percentile(sharpes, 2.5)), float(np.percentile(sharpes, 97.5))
@@ -128,15 +140,15 @@ def _compute_sortino(arr: np.ndarray) -> float:
     downside = arr[arr < 0]
     if len(downside) == 0 or np.std(downside) == 0:
         return 0.0
-    downside_std = float(np.std(downside)) * np.sqrt(252)
-    annual_ret = float(np.mean(arr)) * 252
+    downside_std = float(np.std(downside)) * np.sqrt(ANNUALIZATION_FACTOR)
+    annual_ret = float(np.mean(arr)) * ANNUALIZATION_FACTOR
     return annual_ret / downside_std
 
 
 def _compute_max_drawdown_from_returns(arr: np.ndarray) -> float:
     equity = np.cumprod(1 + arr)
     peak = np.maximum.accumulate(equity)
-    dd = (equity - peak) / (peak + 1e-9)
+    dd = (equity - peak) / (peak + EPSILON)
     return float(np.min(dd))
 
 
@@ -144,7 +156,7 @@ def _compute_omega(arr: np.ndarray, threshold: float = 0.0) -> float:
     gains = arr[arr > threshold] - threshold
     losses = threshold - arr[arr <= threshold]
     if losses.sum() == 0:
-        return 10.0
+        return OMEGA_CAPPED_VALUE
     return float(gains.sum() / losses.sum())
 
 
@@ -200,14 +212,24 @@ def _run_intelligence_layer(
     use_bootstrap = bool(jb_pval < 0.05 and kurt > 5)
 
     defaults = {
-        "stats_quality": "trustworthy" if raw_numbers.get("ttest_reject_null") else "uncertain",
+        "stats_quality": (
+            "trustworthy" if raw_numbers.get("ttest_reject_null") else "uncertain"
+        ),
         "primary_test_to_trust": "bootstrap" if use_bootstrap else "ttest",
-        "cvar_interpretation": f"CVaR 95%: {raw_numbers.get('cvar_95', 0):.3f} per day.",
-        "distribution_assessment": "normal_enough" if raw_numbers.get("is_normal") else "fat_tailed",
-        "skew_risk": "high_crash_risk" if raw_numbers.get("skewness", 0) < -0.5 else "low",
+        "cvar_interpretation": (
+            f"CVaR 95%: {raw_numbers.get('cvar_95', 0):.3f} per day."
+        ),
+        "distribution_assessment": (
+            "normal_enough" if raw_numbers.get("is_normal") else "fat_tailed"
+        ),
+        "skew_risk": (
+            "high_crash_risk" if raw_numbers.get("skewness", 0) < -0.5 else "low"
+        ),
         "sortino_insight": "Sortino computed.",
         "trustworthiness_flags": [],
-        "overall_stats_verdict": "accept" if raw_numbers.get("ttest_reject_null") else "marginal",
+        "overall_stats_verdict": (
+            "accept" if raw_numbers.get("ttest_reject_null") else "marginal"
+        ),
         "recommendation_for_next_agent": "Proceed with DSR computation.",
         "confidence": 0.5,
     }

@@ -36,6 +36,29 @@ factors:
   use_fama_french: true
   ff_factors: ["Mkt-RF", "SMB", "HML"]
 
+walk_forward:
+  enabled: true
+  mode: "single"              # "single", "expanding", "rolling"
+  test_ratio: 0.20            # 20% of data reserved for OOS testing
+  n_folds: 3                  # folds for expanding/rolling mode
+  top_n_validate: 5           # validate top-N leaderboard strategies OOS
+
+sentiment:
+  enabled: true
+  entry_weight: 0.15          # how much sentiment affects entry condition
+  min_headlines: 3            # minimum headlines for a valid signal
+
+sheets_logger:
+  enabled: true
+  spreadsheet_id: "1FWh1kH3UaspfXH4qiCd8AOZ9XrF1X2011R4zIlkA3_s"
+  sheet_name: "RALPH Results"
+  # Setup steps:
+  #   1. Enable Google Sheets API in your GCP project
+  #   2. Create service account → download JSON key
+  #   3. Save key to: credentials/service_account.json
+  #   4. Create a Google Sheet and share (Editor) with service account email
+  #   5. Paste the spreadsheet ID here and set enabled: true
+
 output:
   csv_path: "results.csv"
   memory_dir: "memory/"

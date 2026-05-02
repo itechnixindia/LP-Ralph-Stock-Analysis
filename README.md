@@ -1,8 +1,9 @@
+```markdown
 # Quant RALPH — Multi-Agent Stock Strategy Optimiser
 
 **RALPH** = **R**epeat → **A**ssess → **L**earn → **P**rune → **H**alt
 
-A 7-agent + orchestrator system that uses Bayesian optimisation (Gaussian Process), LLM-extracted sentiment signals, and Claude LLM intelligence to find statistically-validated equity momentum strategies. Each iteration tests a new parameter set, evaluates it through a rigorous quant pipeline, and learns from the result to propose better parameters next time. Walk-forward validation ensures results hold on unseen data.
+A 6-agent + orchestrator system that uses Bayesian optimisation (Gaussian Process) and Claude LLM intelligence to find statistically-validated equity momentum strategies. Each iteration tests a new parameter set, evaluates it through a rigorous quant pipeline, and learns from the result to propose better parameters next time.
 
 ---
 
@@ -21,8 +22,6 @@ python orchestrator.py
 ```
 
 Results appear in `results.csv` after every iteration. The loop is crash-safe — restart anytime and it resumes from where it stopped.
-
-> **Note:** The system works without an Anthropic API key — agents fall back to heuristic defaults. You just lose the LLM intelligence layer.
 
 ---
 
@@ -90,17 +89,12 @@ By iteration 20, each agent receives 4–5 rich contextual narratives from prior
 
 ```
 quant_ralph/
-├── orchestrator.py          # RALPH loop controller + config validation
-├── memory_store.py          # Persistent memory (JSON-based, crash-safe)
+├── orchestrator.py          # RALPH loop controller
+├── memory_store.py          # Persistent memory + narrative history
 ├── llm_client.py            # Shared Anthropic API wrapper
-├── constants.py             # All named constants (no magic numbers)
-├── data_loader.py           # Shared price + factor data loader (cached)
-├── walk_forward.py          # Walk-forward OOS validation engine
-├── news_fetcher.py          # News headline fetcher (Yahoo/Google RSS)
 ├── config.yaml              # All user settings
 ├── requirements.txt
 ├── agents/
-│   ├── agent0_sentiment.py  # LLM-as-Alpha: news sentiment signal
 │   ├── agent1_signal.py     # IC + Fama-French regression + OU half-life
 │   ├── agent2_sizing.py     # Kelly fraction + GARCH(1,1) + vol targeting
 │   ├── agent3_backtest.py   # Event-driven backtest + Almgren-Chriss TC
@@ -108,7 +102,6 @@ quant_ralph/
 │   ├── agent5_dsr.py        # Deflated Sharpe Ratio + PBO + MinTRL
 │   ├── agent6_mutator.py    # Gaussian Process EI + LLM candidate selection
 │   └── prompts/
-│       ├── agent0_prompt.py  # Sentiment scoring prompt
 │       ├── agent1_prompt.py
 │       ├── agent2_prompt.py
 │       ├── agent3_prompt.py
@@ -116,29 +109,17 @@ quant_ralph/
 │       ├── agent5_prompt.py
 │       └── agent6_prompt.py
 ├── results.csv              # Auto-created, one row per iteration
-├── memory/                  # Auto-created, crash-safe persistence (all JSON)
-│   ├── gp_state.json
-│   ├── garch_state.json
+├── memory/                  # Auto-created, crash-safe persistence
+│   ├── gp_state.pkl
+│   ├── garch_state.pkl
 │   ├── pruned.json
 │   ├── leaderboard.json
 │   ├── ic_history.json
-│   ├── narrative_history.json
-│   └── oos_validation.json  # Walk-forward OOS results
-└── cache/                   # Auto-created, price + news data cached here
+│   └── narrative_history.json
+└── cache/                   # Auto-created, price data cached here
     ├── prices_RELIANCE.NS_*.csv
-    ├── ff_factors_*.csv
-    └── news_*.json           # Cached news headlines (6-hour TTL)
+    └── ff_factors_*.csv
 ```
-
-### Key Shared Modules
-
-| Module | Purpose |
-|--------|---------|
-| `constants.py` | ~85 named constants replacing magic numbers — signal thresholds, GARCH parameters, capacity limits, DSR thresholds, walk-forward settings, sentiment weights. |
-| `data_loader.py` | `load_prices()` and `load_ff_factors()` — yfinance + Fama-French data, cached to disk. Single source of truth used by agent1 and agent3. |
-| `memory_store.py` | JSON-based persistence (no pickle). Auto-migrates legacy `.pkl` files to `.json` on first load. Crash-safe — saved after every iteration. |
-| `walk_forward.py` | Walk-forward split generator + OOS validation engine. Supports single, expanding, and rolling modes. |
-| `news_fetcher.py` | News headline fetcher using Yahoo Finance RSS + Google News RSS. Cached with 6-hour TTL. |
 
 ---
 
@@ -177,15 +158,6 @@ transaction_costs:
   slippage_lambda: 0.1           # Almgren-Chriss λ
 ```
 
-### Config Validation
-
-The orchestrator validates your config at startup:
-
-- Required sections: `stock`, `ralph`, `hyperparameter_space`, `risk`, `output`
-- Date format: `YYYY-MM-DD`, `start_date` must be before `end_date`
-- Hyperparameter bounds: all `[min, max]` pairs validated (`min < max`)
-- SMA overlap warning: alerts if `sma_fast` upper bound ≥ `sma_slow` lower bound
-
 ### Supported Tickers
 
 | Exchange | Format | Examples |
@@ -200,22 +172,6 @@ The orchestrator validates your config at startup:
 
 ## Agent Reference
 
-### Agent 0 — Sentiment Signal (`agent0_sentiment.py`) — NEW
-
-**What it does:** Fetches live news headlines and scores them for market sentiment.
-
-**Data sources:**
-- Yahoo Finance RSS (free, no API key)
-- Google News RSS (company name search)
-
-**Two-layer scoring:**
-- **Computation layer**: Keyword-based heuristic scoring (bullish/bearish word lists)
-- **Intelligence layer**: Claude LLM reads up to 20 headlines, scores each -1.0 to +1.0, and produces an aggregate sentiment signal
-
-**Output:** Aggregate sentiment score (-1 to +1), label (bullish/bearish/neutral), dominant theme
-
-**Key:** If LLM is unavailable, the keyword fallback still produces a signal. Sentiment flows through accumulated context to all downstream agents.
-
 ### Agent 1 — Signal Quality (`agent1_signal.py`)
 
 **What it computes:**
@@ -223,8 +179,8 @@ The orchestrator validates your config at startup:
 - **Fama-French regression**: OLS of excess returns on Mkt-RF, SMB, HML → extracts genuine alpha
 - **OU Half-life**: Ornstein-Uhlenbeck fit to signal series → natural holding period
 
-**Key thresholds** (defined in `constants.py`):
-- IC > 0.10 → strong | IC 0.05–0.10 → moderate | IC < 0.05 → weak
+**Key thresholds:**
+- IC > 0.10 → excellent | IC 0.05–0.10 → good | IC < 0.05 → weak
 - IC_IR > 0.5 required for reliable signal
 - Factor α < 0.02%/day is marginal
 
@@ -281,93 +237,6 @@ Also computes:
 - **Iteration 3+**: Gaussian Process (scikit-optimize) with Expected Improvement acquisition
 - Generates **top-3 GP candidates** → Claude LLM picks one based on prior agent context
 - Respects pruned regions — never proposes a dead parameter combination again
-
----
-
-## Walk-Forward Validation (Out-of-Sample Testing)
-
-The system supports **walk-forward validation** — the gold standard for proving a trading strategy works on unseen data.
-
-### How It Works
-
-```
-Full data range: [2020-01-01 ————————————————————— 2024-12-31]
-
-With walk-forward enabled:
-  RALPH trains on:  [2020-01-01 ———————————— 2023-10-17]  (80%)
-  OOS validates on: [2023-10-18 ——— 2024-12-31]           (20%)
-```
-
-1. The RALPH loop runs all 100 iterations on the **training period only**
-2. After halt, the top-5 leaderboard strategies are automatically tested on the **out-of-sample period**
-3. Results are classified as:
-
-| OOS Verdict | Meaning |
-|-------------|---------|
-| **CONFIRMED** | OOS Sharpe ≥ 50% of IS Sharpe, OOS DSR > 0.50 |
-| **DEGRADED** | OOS is weaker but still positive |
-| **FAILED** | Strategy doesn't hold on unseen data |
-
-### Configuration
-
-```yaml
-walk_forward:
-  enabled: true
-  mode: "single"        # "single", "expanding", or "rolling"
-  test_ratio: 0.20      # reserve 20% of data for OOS
-  n_folds: 3            # folds for expanding/rolling mode
-  top_n_validate: 5     # validate top-N leaderboard strategies
-```
-
-### Modes
-
-| Mode | Description |
-|------|-------------|
-| `single` | One split: train on 80%, test on 20% |
-| `expanding` | N folds with growing training window (anchored start) |
-| `rolling` | N folds with fixed-width sliding training window |
-
-### Output
-
-- `memory/oos_validation.json` — Full OOS results for each validated strategy
-- `final_report.txt` — Appended with OOS validation summary
-
----
-
-## Sentiment Signal (LLM-as-Alpha)
-
-The system can use **news sentiment** as an additional alpha source alongside SMA/RSI technical signals.
-
-### How It Works
-
-1. `news_fetcher.py` pulls headlines from Yahoo Finance RSS + Google News RSS (free, no API key)
-2. `agent0_sentiment.py` scores each headline:
-   - **Computation layer**: Keyword-based scoring (30+ bullish/bearish word lists)
-   - **Intelligence layer**: Claude LLM reads 20 headlines and produces a -1.0 to +1.0 aggregate score
-3. Sentiment flows through `accumulated_context` to all downstream agents
-4. All agents can factor sentiment into their decisions
-
-### Configuration
-
-```yaml
-sentiment:
-  enabled: true
-  entry_weight: 0.15     # how much sentiment affects entry decision
-  min_headlines: 3        # minimum headlines for a valid signal
-```
-
-### Example Output
-
-```
-  A: Stage 0 — sentiment
-     sentiment=0.342 (mildly_bullish) headlines=12
-```
-
-### Graceful Degradation
-
-- No internet? → Empty headlines → keyword_aggregate = 0.0 (neutral)
-- No Anthropic API key? → Keyword scoring still works
-- News fetch fails? → Pipeline continues without sentiment (logged as warning)
 
 ---
 
@@ -441,7 +310,7 @@ python agents/agent3_backtest.py   # Tests full backtest simulation
 python agents/agent4_stats.py      # Tests all hypothesis tests
 python agents/agent5_dsr.py        # Verifies DSR formula against paper values
 python agents/agent6_mutator.py    # Tests random (iter 1) + GP (iter 5)
-python memory_store.py             # Tests JSON save/load cycle
+python memory_store.py             # Tests save/load cycle
 ```
 
 ---
@@ -473,29 +342,6 @@ First run downloads and caches everything (~5 seconds). All 100 iterations read 
 
 ---
 
-## Design Principles
-
-| Principle | Implementation |
-|-----------|---------------|
-| **No magic numbers** | All thresholds and constants defined in `constants.py` |
-| **DRY** | Shared `data_loader.py` for price/factor data (used by agent1 + agent3) |
-| **Secure persistence** | JSON-only storage — no pickle (eliminates arbitrary code execution risk) |
-| **Validated config** | `validate_config()` runs at startup — catches bad dates, bounds, missing keys |
-| **Graceful LLM degradation** | System works without Anthropic API key — agents use heuristic defaults |
-| **Crash-safe** | Memory saved after every iteration; restart resumes from `n_trials + 1` |
-
----
-
-## Migrating from Legacy Versions
-
-If you have existing `.pkl` files in `memory/`:
-
-- **Auto-migration**: On first load, `memory_store.py` converts `gp_state.pkl` and `garch_state.pkl` to `.json` equivalents
-- **Backup**: Original `.pkl` files are renamed to `.pkl.bak`
-- **No action needed**: Just run the system and it migrates automatically
-
----
-
 ## Pre-Deployment Checklist
 
 Before trading real capital:
@@ -519,3 +365,6 @@ Before trading real capital:
 - López de Prado, M. (2018). *Advances in Financial Machine Learning.* Wiley.
 - Almgren, R., & Chriss, N. (2001). *Optimal execution of portfolio transactions.* Journal of Risk.
 - Ornstein, L. S., & Uhlenbeck, G. E. (1930). *On the theory of Brownian motion.* Physical Review.
+```
+
+Copy this into `README.md` at the repo root and commit it. Everything else is already pushed to `claude/quant-ralph-multi-agent-GM7ub`.

@@ -13,6 +13,7 @@ Usage:
 """
 
 import logging
+import math
 import os
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -48,21 +49,23 @@ def _get_or_create_worksheet(spreadsheet, sheet_name: str):
         )
 
 
+def _sanitize_value(val):
+    """Sanitize a value for Google Sheets (nan/inf are not JSON-compliant)."""
+    if val is None:
+        return ""
+    if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+        return ""
+    if isinstance(val, bool):
+        return str(val)
+    if isinstance(val, (list, dict)):
+        return str(val)[:500]
+    return val
+
+
 def _build_row(iteration_data: dict) -> List:
     """Convert iteration dict to ordered list of values for the sheet."""
     columns = get_column_order()
-    row = []
-    for col in columns:
-        val = iteration_data.get(col, "")
-        # Convert non-serializable types
-        if isinstance(val, bool):
-            val = str(val)
-        elif isinstance(val, (list, dict)):
-            val = str(val)[:500]  # Truncate long values
-        elif val is None:
-            val = ""
-        row.append(val)
-    return row
+    return [_sanitize_value(iteration_data.get(col, "")) for col in columns]
 
 
 def get_column_order() -> List[str]:
@@ -225,7 +228,7 @@ class SheetsLogger:
 
             # Data rows
             for r in oos_results:
-                row = [r.get(col, "") for col in oos_columns]
+                row = [_sanitize_value(r.get(col, "")) for col in oos_columns]
                 oos_sheet.append_row(row, value_input_option="USER_ENTERED")
 
             logger.info(f"  Sheets: OOS results logged ({len(oos_results)} strategies)")

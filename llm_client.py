@@ -30,9 +30,11 @@ if os.path.exists(_env_path):
 _gemini_client = None
 _anthropic_client = None
 
-# ── Gemini pricing (per 1M tokens) ───────────────────────────────────────────
+# ── LLM pricing (per 1M tokens) ──────────────────────────────────────────────
 GEMINI_INPUT_COST_PER_1M = 0.50
 GEMINI_OUTPUT_COST_PER_1M = 3.00
+ANTHROPIC_INPUT_COST_PER_1M = 3.00
+ANTHROPIC_OUTPUT_COST_PER_1M = 15.00
 
 # ── Cost tracker (thread-safe) ───────────────────────────────────────────────
 _cost_lock = threading.Lock()
@@ -59,11 +61,17 @@ def get_iteration_cost() -> dict:
         return dict(_iteration_cost)
 
 
-def _track_cost(input_tokens: int, output_tokens: int):
+def _track_cost(input_tokens: int, output_tokens: int, provider: str = "gemini"):
     """Accumulate token usage and cost for this iteration."""
+    if provider == "anthropic":
+        cost_in = ANTHROPIC_INPUT_COST_PER_1M
+        cost_out = ANTHROPIC_OUTPUT_COST_PER_1M
+    else:
+        cost_in = GEMINI_INPUT_COST_PER_1M
+        cost_out = GEMINI_OUTPUT_COST_PER_1M
     cost = (
-        (input_tokens / 1_000_000) * GEMINI_INPUT_COST_PER_1M
-        + (output_tokens / 1_000_000) * GEMINI_OUTPUT_COST_PER_1M
+        (input_tokens / 1_000_000) * cost_in
+        + (output_tokens / 1_000_000) * cost_out
     )
     with _cost_lock:
         _iteration_cost["input_tokens"] += input_tokens
@@ -259,7 +267,7 @@ def _call_anthropic(
             )
             raw = response.content[0].text.strip()
             if hasattr(response, "usage"):
-                _track_cost(response.usage.input_tokens, response.usage.output_tokens)
+                _track_cost(response.usage.input_tokens, response.usage.output_tokens, provider="anthropic")
             return _parse_json_response(raw, agent_name)
         except Exception as e:
             err = str(e).lower()

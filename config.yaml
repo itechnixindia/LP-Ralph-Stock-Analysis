@@ -5,7 +5,7 @@ stock:
   benchmark: "^NSEI"
 
 ralph:
-  max_iterations: 100
+  max_iterations: 20
   cost_budget_usd: 5.0
   dsr_plateau_window: 10
   dsr_plateau_threshold: 0.01

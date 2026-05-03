@@ -148,6 +148,14 @@ def run_oos_validation(
     )
 
     # Stage 3: Backtest on TEST period only
+    # Signal was computed on train+test, slice to test period length
+    from data_loader import load_prices
+    test_df = load_prices(ticker, split.test_start, split.test_end)
+    n_test_days = len(test_df) if test_df is not None else 245
+    full_signal = sig_out["signal_series"]
+    # Take the TAIL of the signal to align with the test period
+    test_signal = full_signal[-n_test_days:] if len(full_signal) > n_test_days else full_signal
+
     bt_out = run_backtest(
         ticker=ticker,
         start_date=split.test_start,
@@ -155,7 +163,7 @@ def run_oos_validation(
         params=strategy_params,
         stop_loss_used=siz_out["stop_loss_used"],
         final_weight=siz_out["final_weight"],
-        signal_series=sig_out["signal_series"],
+        signal_series=test_signal,
         regime="unknown",
         transaction_costs=config.get("transaction_costs", {}),
     )
@@ -180,19 +188,27 @@ def run_oos_validation(
         sharpe_ci_high=stats_out["sharpe_ci_high"],
     )
 
+    import math
+
+    def _safe(v, default=0.0):
+        """Replace nan/inf with a safe default."""
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            return default
+        return v
+
     return {
         "fold": split.fold,
         "test_start": split.test_start,
         "test_end": split.test_end,
-        "oos_sharpe": bt_out["net_sharpe_tc"],
-        "oos_return": bt_out["total_return"],
-        "oos_max_drawdown": bt_out["max_drawdown"],
-        "oos_win_rate": bt_out["win_rate"],
+        "oos_sharpe": _safe(bt_out["net_sharpe_tc"]),
+        "oos_return": _safe(bt_out["total_return"]),
+        "oos_max_drawdown": _safe(bt_out["max_drawdown"]),
+        "oos_win_rate": _safe(bt_out["win_rate"]),
         "oos_num_trades": bt_out["num_trades"],
-        "oos_dsr": dsr_out["dsr"],
-        "oos_cvar": stats_out["cvar_95"],
-        "oos_sortino": stats_out["sortino"],
-        "oos_ttest_pval": stats_out["ttest_pval"],
+        "oos_dsr": _safe(dsr_out["dsr"]),
+        "oos_cvar": _safe(stats_out["cvar_95"]),
+        "oos_sortino": _safe(stats_out["sortino"]),
+        "oos_ttest_pval": _safe(stats_out["ttest_pval"]),
     }
 
 
